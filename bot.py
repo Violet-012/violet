@@ -5,14 +5,14 @@ import tempfile
 
 import discord
 from discord.ext import commands
-from gtts import gTTS
+import edge_tts
 
 import config
 
 
-# ==========================================
-# LOAD OPUS
-# ==========================================
+# =========================================================
+# OPUS
+# =========================================================
 
 OPUS_PATH = "/opt/homebrew/lib/libopus.dylib"
 
@@ -26,9 +26,9 @@ except Exception as error:
     print(f"OPUS ERROR: {repr(error)}")
 
 
-# ==========================================
+# =========================================================
 # BOT SETUP
-# ==========================================
+# =========================================================
 
 intents = discord.Intents.all()
 
@@ -38,34 +38,104 @@ bot = commands.Bot(
 )
 
 
-# ==========================================
+# =========================================================
 # TTS SETTINGS
-# ==========================================
+# =========================================================
 
-tts_enabled = False
+tts_enabled = {}
+
 tts_queue = asyncio.Queue()
+
 tts_worker_task = None
 
 FFMPEG_PATH = "/opt/homebrew/bin/ffmpeg"
 
 
-# ==========================================
+# =========================================================
+# VOICES
+# =========================================================
+
+# Main Violet voice
+ENGLISH_VOICE = "en-US-AvaNeural"
+
+# Hindi voice
+HINDI_VOICE = "hi-IN-SwaraNeural"
+
+
+# =========================================================
+# VOICE STYLE
+# =========================================================
+
+TTS_RATE = "-5%"
+TTS_PITCH = "+2Hz"
+TTS_VOLUME = "+0%"
+
+
+# =========================================================
+# SPEAKER TRACKING
+# =========================================================
+
+# Stores the last speaker for each Discord server.
+#
+# Example:
+#
+# Server A -> Aarav
+# Server B -> Rahul
+
+last_speaker = {}
+
+
+# =========================================================
 # LANGUAGE DETECTION
-# ==========================================
+# =========================================================
 
-def detect_language(text: str) -> str:
+def detect_language(text: str):
 
-    # Hindi / Devanagari
+    # Detect Hindi / Devanagari characters
     if re.search(r"[\u0900-\u097F]", text):
         return "hi"
 
-    # Default to English
     return "en"
 
 
-# ==========================================
+# =========================================================
+# GET VOICE
+# =========================================================
+
+def get_voice(text: str):
+
+    language = detect_language(text)
+
+    if language == "hi":
+        return HINDI_VOICE
+
+    return ENGLISH_VOICE
+
+
+# =========================================================
+# GENERATE TTS
+# =========================================================
+
+async def generate_tts(text, filename):
+
+    voice = get_voice(text)
+
+    print(f"TTS voice: {voice}")
+
+    communicate = edge_tts.Communicate(
+        text=text,
+        voice=voice,
+        rate=TTS_RATE,
+        pitch=TTS_PITCH,
+        volume=TTS_VOLUME
+    )
+
+    await communicate.save(filename)
+
+
+# =========================================================
 # TTS WORKER
-# ==========================================
+# =========================================================
 
 async def tts_worker():
 
@@ -90,16 +160,18 @@ async def tts_worker():
             if not voice_client.is_connected():
                 continue
 
-            # Wait for currently playing audio
+            # Wait for current audio
             while voice_client.is_playing():
+
                 await asyncio.sleep(0.2)
 
-            language = detect_language(text)
-
             print("--------------------------------")
-            print(f"TTS: [{language}] {text}")
+            print(f"TTS: {text}")
 
-            # Create temporary MP3 file
+            # -------------------------------------------------
+            # CREATE TEMPORARY MP3
+            # -------------------------------------------------
+
             with tempfile.NamedTemporaryFile(
                 suffix=".mp3",
                 delete=False
@@ -111,23 +183,23 @@ async def tts_worker():
                 f"Creating audio file: {audio_file}"
             )
 
-            # Generate speech
-            tts = gTTS(
-                text=text,
-                lang=language,
-                slow=False
-            )
+            # -------------------------------------------------
+            # GENERATE TTS
+            # -------------------------------------------------
 
-            await asyncio.to_thread(
-                tts.save,
+            await generate_tts(
+                text,
                 audio_file
             )
 
-            # Check file
+            # -------------------------------------------------
+            # CHECK FILE
+            # -------------------------------------------------
+
             if not os.path.exists(audio_file):
 
                 print(
-                    "TTS ERROR: MP3 file was not created."
+                    "TTS ERROR: Audio file was not created."
                 )
 
                 continue
@@ -143,12 +215,15 @@ async def tts_worker():
             if file_size == 0:
 
                 print(
-                    "TTS ERROR: MP3 file is empty."
+                    "TTS ERROR: Audio file is empty."
                 )
 
                 continue
 
-            # Check Opus
+            # -------------------------------------------------
+            # CHECK OPUS
+            # -------------------------------------------------
+
             if not discord.opus.is_loaded():
 
                 print(
@@ -157,7 +232,10 @@ async def tts_worker():
 
                 continue
 
-            # Check voice connection again
+            # -------------------------------------------------
+            # CHECK CONNECTION
+            # -------------------------------------------------
+
             voice_client = guild.voice_client
 
             if voice_client is None:
@@ -166,12 +244,16 @@ async def tts_worker():
             if not voice_client.is_connected():
                 continue
 
-            # Event for playback completion
+            # -------------------------------------------------
+            # PLAYBACK EVENT
+            # -------------------------------------------------
+
             finished = asyncio.Event()
 
             def after_play(error):
 
                 if error:
+
                     print(
                         f"Playback error: {repr(error)}"
                     )
@@ -180,7 +262,10 @@ async def tts_worker():
                     finished.set
                 )
 
-            # Create FFmpeg source
+            # -------------------------------------------------
+            # FFMPEG
+            # -------------------------------------------------
+
             source = discord.FFmpegPCMAudio(
                 audio_file,
                 executable=FFMPEG_PATH
@@ -190,12 +275,12 @@ async def tts_worker():
                 "Playing TTS audio..."
             )
 
-            # Play audio
             voice_client.play(
                 source,
                 after=after_play
             )
 
+            # Wait until audio finishes
             await finished.wait()
 
             print(
@@ -210,7 +295,10 @@ async def tts_worker():
 
         finally:
 
-            # Remove temporary file
+            # -------------------------------------------------
+            # DELETE TEMPORARY FILE
+            # -------------------------------------------------
+
             if (
                 audio_file
                 and os.path.exists(audio_file)
@@ -227,16 +315,16 @@ async def tts_worker():
                 except Exception as error:
 
                     print(
-                        f"Could not remove temporary "
+                        "Could not remove temporary "
                         f"file: {repr(error)}"
                     )
 
             tts_queue.task_done()
 
 
-# ==========================================
+# =========================================================
 # BOT READY
-# ==========================================
+# =========================================================
 
 @bot.event
 async def on_ready():
@@ -245,7 +333,7 @@ async def on_ready():
 
     await bot.tree.sync()
 
-    # Start TTS worker
+    # Start TTS worker once
     if (
         tts_worker_task is None
         or tts_worker_task.done()
@@ -262,9 +350,9 @@ async def on_ready():
     print("--------------------------------")
 
 
-# ==========================================
+# =========================================================
 # MESSAGE LISTENER
-# ==========================================
+# =========================================================
 
 @bot.event
 async def on_message(
@@ -275,18 +363,20 @@ async def on_message(
     if message.author.bot:
         return
 
-    # Keep normal commands working
+    # Keep commands working
     await bot.process_commands(message)
-
-    # TTS disabled
-    if not tts_enabled:
-        return
 
     # Ignore DMs
     if message.guild is None:
         return
 
-    # Get voice client
+    guild_id = message.guild.id
+
+    # Check TTS
+    if not tts_enabled.get(guild_id, False):
+        return
+
+    # Check voice connection
     voice_client = message.guild.voice_client
 
     if voice_client is None:
@@ -295,35 +385,83 @@ async def on_message(
     if not voice_client.is_connected():
         return
 
-    # Get message
-    text = message.content.strip()
+    # Get message text
+    message_text = message.content.strip()
 
-    if not text:
+    if not message_text:
         return
 
     # Don't speak commands
-    if text.startswith(("!", "/")):
+    if message_text.startswith(("!", "/")):
         return
 
-    # Prevent extremely long messages
-    if len(text) > 500:
-        text = text[:500] + "..."
+    # Limit extremely long messages
+    if len(message_text) > 500:
 
-    print(
-        f"Message from {message.author}: {text}"
+        message_text = (
+            message_text[:500]
+            + "..."
+        )
+
+    # Get display name
+    username = message.author.display_name
+
+    # Remove @ from name
+    username = username.replace(
+        "@",
+        ""
     )
 
+    # -------------------------------------------------------
+    # SMART SPEAKER SYSTEM
+    # -------------------------------------------------------
+
+    previous_speaker = last_speaker.get(
+        guild_id
+    )
+
+    current_speaker = message.author.id
+
+    # Same person continues talking
+    if previous_speaker == current_speaker:
+
+        spoken_text = message_text
+
+    # New person starts talking
+    else:
+
+        spoken_text = (
+            f"{username} said, "
+            f"{message_text}"
+        )
+
+        last_speaker[guild_id] = current_speaker
+
+    # -------------------------------------------------------
+    # LOG
+    # -------------------------------------------------------
+
+    print(
+        f"Message from {username}: "
+        f"{message_text}"
+    )
+
+    print(
+        f"Speaking: {spoken_text}"
+    )
+
+    # Add to TTS queue
     await tts_queue.put(
         (
-            text,
-            message.guild.id
+            spoken_text,
+            guild_id
         )
     )
 
 
-# ==========================================
+# =========================================================
 # /PING
-# ==========================================
+# =========================================================
 
 @bot.tree.command(
     name="ping",
@@ -342,9 +480,9 @@ async def ping(
     )
 
 
-# ==========================================
+# =========================================================
 # /HELLO
-# ==========================================
+# =========================================================
 
 @bot.tree.command(
     name="hello",
@@ -359,9 +497,9 @@ async def hello(
     )
 
 
-# ==========================================
+# =========================================================
 # /VIOLETJOIN
-# ==========================================
+# =========================================================
 
 @bot.tree.command(
     name="violetjoin",
@@ -371,14 +509,14 @@ async def violetjoin(
     interaction: discord.Interaction
 ):
 
-    global tts_enabled
+    guild_id = interaction.guild.id
 
     print("================================")
     print("VIOLETJOIN RECEIVED")
     print(f"User: {interaction.user}")
     print(f"Guild: {interaction.guild}")
 
-    # User must be in voice
+    # Check user voice
     if interaction.user.voice is None:
 
         await interaction.response.send_message(
@@ -405,11 +543,6 @@ async def violetjoin(
         # Already connected
         if voice_client is not None:
 
-            print(
-                "Violet is already connected."
-            )
-
-            # Move to user's channel
             if voice_client.channel != channel:
 
                 print(
@@ -421,7 +554,7 @@ async def violetjoin(
                     channel
                 )
 
-        # Not connected
+        # Connect
         else:
 
             print(
@@ -432,7 +565,13 @@ async def violetjoin(
             voice_client = await channel.connect()
 
         # Enable TTS
-        tts_enabled = True
+        tts_enabled[guild_id] = True
+
+        # Reset speaker when Violet joins
+        last_speaker.pop(
+            guild_id,
+            None
+        )
 
         print(
             "Successfully connected to voice."
@@ -458,9 +597,9 @@ async def violetjoin(
             )
 
 
-# ==========================================
+# =========================================================
 # /LEAVE
-# ==========================================
+# =========================================================
 
 @bot.tree.command(
     name="leave",
@@ -470,7 +609,7 @@ async def leave(
     interaction: discord.Interaction
 ):
 
-    global tts_enabled
+    guild_id = interaction.guild.id
 
     voice_client = interaction.guild.voice_client
 
@@ -486,24 +625,18 @@ async def leave(
     try:
 
         # Disable TTS
-        tts_enabled = False
+        tts_enabled[guild_id] = False
+
+        # Reset speaker
+        last_speaker.pop(
+            guild_id,
+            None
+        )
 
         # Stop audio
         if voice_client.is_playing():
 
             voice_client.stop()
-
-        # Clear TTS queue
-        while not tts_queue.empty():
-
-            try:
-
-                tts_queue.get_nowait()
-                tts_queue.task_done()
-
-            except asyncio.QueueEmpty:
-
-                break
 
         # Disconnect
         await voice_client.disconnect()
@@ -529,9 +662,9 @@ async def leave(
         )
 
 
-# ==========================================
+# =========================================================
 # /TTS
-# ==========================================
+# =========================================================
 
 @bot.tree.command(
     name="tts",
@@ -542,10 +675,11 @@ async def tts(
     enabled: bool
 ):
 
-    global tts_enabled
+    guild_id = interaction.guild.id
 
     voice_client = interaction.guild.voice_client
 
+    # Enable
     if enabled:
 
         if voice_client is None:
@@ -558,49 +692,49 @@ async def tts(
 
             return
 
-        tts_enabled = True
+        tts_enabled[guild_id] = True
 
         await interaction.response.send_message(
             "🔊 TTS enabled."
         )
 
         print(
-            "TTS enabled."
+            f"TTS enabled in "
+            f"{interaction.guild.name}."
         )
 
+    # Disable
     else:
 
-        tts_enabled = False
+        tts_enabled[guild_id] = False
 
+        # Reset speaker
+        last_speaker.pop(
+            guild_id,
+            None
+        )
+
+        # Stop current audio
         if voice_client:
 
             if voice_client.is_playing():
 
                 voice_client.stop()
 
-        # Clear queue
-        while not tts_queue.empty():
-
-            try:
-
-                tts_queue.get_nowait()
-                tts_queue.task_done()
-
-            except asyncio.QueueEmpty:
-
-                break
-
         await interaction.response.send_message(
             "🔇 TTS disabled."
         )
 
         print(
-            "TTS disabled."
+            f"TTS disabled in "
+            f"{interaction.guild.name}."
         )
 
 
-# ==========================================
+# =========================================================
 # START BOT
-# ==========================================
+# =========================================================
 
-bot.run(config.DISCORD_TOKEN)
+bot.run(
+    config.DISCORD_TOKEN
+)
